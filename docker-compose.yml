@@ -1,0 +1,150 @@
+name: moai
+
+networks:
+  moai:
+    name: moai
+
+services:
+  ollama:
+    image: ollama/ollama:0.22.0
+    container_name: ollama
+    restart: unless-stopped
+    networks: [moai]
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: 10m
+      OLLAMA_CONTEXT_LENGTH: "8192"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    networks: [moai]
+    depends_on:
+      - ollama
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_AUTH: "False"
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.1
+    container_name: qdrant
+    restart: unless-stopped
+    networks: [moai]
+    ports:
+      - "127.0.0.1:6333:6333"   # HTTP
+      - "127.0.0.1:6334:6334"   # gRPC
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    networks: [moai]
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: persona
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-persona}"
+      POSTGRES_DB: persona
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U persona"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  persona-store:
+    image: ghcr.io/muxu-io/persona-store:1.0.0
+    container_name: persona-store
+    restart: unless-stopped
+    networks: [moai]
+    ports:
+      - "127.0.0.1:7600:7600"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    environment:
+      PERSONA_STORE_DATABASE_URL: "postgresql://persona:${POSTGRES_PASSWORD:-persona}@postgres:5432/persona"
+      PERSONA_STORE_QDRANT_HOST: qdrant
+      PERSONA_STORE_QDRANT_PORT: "6333"
+      PERSONA_STORE_OLLAMA_HOST: http://ollama:11434
+      PERSONA_STORE_MEDIA_DIR: /data/media
+    volumes:
+      - persona-store-media:/data/media
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7600/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  voice-svc:
+    image: ghcr.io/muxu-io/voice-svc:1.0.0
+    container_name: voice-svc
+    restart: unless-stopped
+    networks: [moai]
+    group_add:
+      - "${VOICE_SVC_GPU_GID:?run via make, or: VOICE_SVC_GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
+    ports:
+      - "127.0.0.1:7000:7000"
+    volumes:
+      - voice-svc-models:/home/app/.local/share/tts
+      - voice-svc-hf-cache:/home/app/.cache/huggingface
+      - voice-svc-sample-cache:/home/app/.cache/voice-samples
+    environment:
+      VOICE_SVC_PORT: "7000"
+      VOICE_SVC_SAMPLE_CACHE_DIR: /home/app/.cache/voice-samples
+      # Accept Coqui XTTS-v2's non-commercial license so the model downloads
+      # without an interactive prompt. Required for the xtts-v2 engine to load.
+      COQUI_TOS_AGREED: "1"
+      HF_HOME: /home/app/.cache/huggingface
+      TTS_HOME: /home/app/.local/share/tts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7000/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ollama:
+    name: ollama
+    external: true
+  qdrant-data:
+    name: qdrant-data
+    external: true
+  open-webui-data:
+  postgres-data:
+  persona-store-media:
+  voice-svc-models:
+  voice-svc-hf-cache:
+  voice-svc-sample-cache:
