@@ -13,11 +13,28 @@ MODEL ?= $(PERSONA_MODEL)
 # voice-svc lives here and needs the host `video` group's GID for GPU access.
 export VOICE_SVC_GPU_GID ?= $(shell getent group video | cut -d: -f3)
 
-.PHONY: help up down restart logs ps pull models smoke vram chat ui \
-        qdrant-status qdrant-ui pull-model
+GITLAB_PYPI_CLI  ?= https://gitlab.com/api/v4/projects/83774809/packages/pypi/simple
+GITLAB_PYPI_CORE ?= https://gitlab.com/api/v4/projects/83381755/packages/pypi/simple
+EMBED_MODEL      ?= nomic-embed-text
+E2E_DIR          ?= tests/e2e
+E2E_VENV         ?= $(E2E_DIR)/.venv
+
+# Persona chatted with by `make chat` (override: make chat PERSONA_ID=...).
+PERSONA_ID ?= ada-mcleish
+# Extra persona-cli flags, e.g. make chat CLI_ARGS="--no-voice --scenario shift-cut-corridor".
+CLI_ARGS   ?=
+
+# `make load-persona` reads $(PERSONA_ID).md from here and POSTs it to the store.
+# Same env vars the e2e harness (helpers/config.py) uses, so overrides apply to both.
+MOAI_PERSONAS_DIR ?= $(HOME)/moai/personas
+PERSONA_FILE      ?= $(MOAI_PERSONAS_DIR)/$(PERSONA_ID).md
+PERSONA_STORE_URL ?= http://localhost:7600
+
+.PHONY: help up down restart logs ps pull models smoke vram chat ollama-chat ui \
+        qdrant-status qdrant-ui pull-model load-persona e2e
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
 
 up: ## Start the platform + runtime services in the background
 	docker compose up -d
@@ -40,9 +57,11 @@ pull: ## Pull MODEL (override: make pull MODEL=...)
 models: ## List downloaded models
 	docker compose exec ollama ollama list
 
-pull-model: up ## Pull PERSONA_MODEL into ollama (~6.6 GB; idempotent)
+pull-model: up ## Pull PERSONA_MODEL + EMBED_MODEL into ollama (~6.6 GB; idempotent)
 	@echo "[pull-model] pulling $(PERSONA_MODEL) (no-op if already cached)"
 	docker compose exec ollama ollama pull $(PERSONA_MODEL)
+	@echo "[pull-model] pulling embed model $(EMBED_MODEL) (no-op if already cached)"
+	docker compose exec ollama ollama pull $(EMBED_MODEL)
 
 smoke: ## Quick inference smoke test against MODEL
 	@curl -s http://localhost:11434/api/generate -d '{"model":"$(MODEL)","prompt":"In one sentence, what is the difference between an LLM and a database?","stream":false}' \
@@ -51,8 +70,17 @@ smoke: ## Quick inference smoke test against MODEL
 vram: ## Show GPU memory usage
 	@nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv
 
-chat: ## Terminal chat with MODEL via the ollama CLI
+chat: pull-model $(E2E_VENV)/bin/persona ## Persona chat with PERSONA_ID (override: make chat PERSONA_ID=...)
+	$(E2E_VENV)/bin/persona chat $(PERSONA_ID) $(CLI_ARGS)
+
+ollama-chat: ## Raw terminal chat with MODEL via the ollama CLI (no persona)
 	docker compose exec -it ollama ollama run $(MODEL)
+
+load-persona: pull-model $(E2E_VENV)/bin/persona ## Ingest PERSONA_ID's markdown into persona-store (make load-persona PERSONA_ID=...)
+	@test -f "$(PERSONA_FILE)" || { echo "persona file not found: $(PERSONA_FILE)"; echo "set MOAI_PERSONAS_DIR or PERSONA_FILE"; exit 2; }
+	@echo "[load-persona] ingesting $(PERSONA_FILE) as '$(PERSONA_ID)' into $(PERSONA_STORE_URL)"
+	@PID="$(PERSONA_ID)" PF="$(PERSONA_FILE)" PERSONA_STORE_URL="$(PERSONA_STORE_URL)" PYTHONPATH="$(E2E_DIR)" \
+	  $(E2E_VENV)/bin/python -c 'import os; from pathlib import Path; from persona_core.parser import parse_persona_file; from persona_core.serialization import persona_to_definition; from helpers.store_http import StoreHTTP; p = parse_persona_file(Path(os.environ["PF"])); s = StoreHTTP(os.environ["PERSONA_STORE_URL"]); s.post_persona(os.environ["PID"], persona_to_definition(p), spec_version=p.spec_version); r = s.get_runtime(os.environ["PID"]); print("loaded:", os.environ["PID"], "(http", s.get_persona(os.environ["PID"]).status_code, "memory_seeded", (r or {}).get("memory_seeded"), ")")'
 
 ui: ## Open the chat web UI in the default browser
 	@xdg-open http://localhost:8080 >/dev/null 2>&1 &
@@ -63,3 +91,33 @@ qdrant-status: ## Show Qdrant collections and health
 
 qdrant-ui: ## Open Qdrant dashboard
 	@echo "Qdrant dashboard: http://localhost:6333/dashboard"
+
+# Build the harness venv holding the published persona-cli + persona-core
+# wheels. Shared by `make chat` (build-once) and `make e2e` (forced rebuild).
+define build_venv
+python3 -m venv $(E2E_VENV)
+$(E2E_VENV)/bin/pip install -q --upgrade pip
+$(E2E_VENV)/bin/pip install -q --extra-index-url $(GITLAB_PYPI_CLI) --extra-index-url $(GITLAB_PYPI_CORE) -e $(E2E_DIR)
+endef
+
+# `make chat` builds this once; rebuilt only when the harness pyproject changes.
+$(E2E_VENV)/bin/persona: $(E2E_DIR)/pyproject.toml
+	@echo "[venv] building persona-cli harness venv (persona-cli + persona-core)"
+	$(build_venv)
+
+e2e: up pull-model ## Run the gated end-to-end integration suite (GPU host)
+	@echo "[e2e] rebuilding harness venv from pinned wheels"
+	rm -rf $(E2E_VENV)
+	$(build_venv)
+	@echo "[e2e] waiting for HTTP services to become ready (up -d does not wait for health)"
+	@for url in http://localhost:7600/health http://localhost:7000/health \
+	            http://localhost:6333/healthz http://localhost:11434/api/tags \
+	            http://localhost:8080/health; do \
+	  printf '  %-40s ' "$$url"; \
+	  n=0; until curl -fsS "$$url" >/dev/null 2>&1; do \
+	    n=$$((n+1)); [ $$n -gt 60 ] && { echo "TIMEOUT"; exit 1; }; sleep 3; \
+	  done; echo "ok"; \
+	done
+	@echo "[e2e] running pytest"
+	PERSONA_MODEL="$(PERSONA_MODEL)" EMBED_MODEL="$(EMBED_MODEL)" \
+	  $(E2E_VENV)/bin/python -m pytest $(E2E_DIR) -v

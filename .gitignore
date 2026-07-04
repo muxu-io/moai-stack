@@ -1,2 +1,8 @@
 # Local env — .env.sample is committed; .env is not.
 .env
+
+# e2e harness virtualenv + editable-install build artifacts
+tests/e2e/.venv/
+tests/e2e/*.egg-info/
+tests/e2e/**/__pycache__/
+.pytest_cache/
