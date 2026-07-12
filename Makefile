@@ -105,6 +105,8 @@ $(E2E_VENV)/bin/persona: $(E2E_DIR)/pyproject.toml
 	@echo "[venv] building persona-cli harness venv (persona-cli + persona-core)"
 	$(build_venv)
 
+E2E_IMAGE_GEN_MODEL ?= realvis-xl-v5
+e2e: export IMAGE_GEN_MODEL := $(E2E_IMAGE_GEN_MODEL)
 e2e: up pull-model ## Run the gated end-to-end integration suite (GPU host)
 	@echo "[e2e] rebuilding harness venv from pinned wheels"
 	rm -rf $(E2E_VENV)
@@ -112,7 +114,8 @@ e2e: up pull-model ## Run the gated end-to-end integration suite (GPU host)
 	@echo "[e2e] waiting for HTTP services to become ready (up -d does not wait for health)"
 	@for url in http://localhost:7600/health http://localhost:7000/health \
 	            http://localhost:6333/healthz http://localhost:11434/api/tags \
-	            http://localhost:8080/health; do \
+	            http://localhost:8080/health http://localhost:7300/health \
+	            http://localhost:7250/health; do \
 	  printf '  %-40s ' "$$url"; \
 	  n=0; until curl -fsS "$$url" >/dev/null 2>&1; do \
 	    n=$$((n+1)); [ $$n -gt 60 ] && { echo "TIMEOUT"; exit 1; }; sleep 3; \

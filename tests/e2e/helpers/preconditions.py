@@ -44,6 +44,25 @@ def check_services(cfg: Config) -> list[str]:
     except Exception as e:  # noqa: BLE001
         problems.append(f"voice-svc unreachable at {cfg.voice_svc_url} ({e}); run `make up`")
 
+    # image-gen-svc
+    try:
+        if _get(f"{cfg.image_gen_url}/health").status_code != 200:
+            problems.append(f"image-gen-svc unhealthy at {cfg.image_gen_url}/health; run `make up`")
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"image-gen-svc unreachable at {cfg.image_gen_url} ({e}); run `make up`")
+
+    # persona-create
+    try:
+        r = _get(f"{cfg.persona_create_url}/health")
+        if not (r.status_code == 200 and r.json().get("status") == "ok"):
+            problems.append(
+                f"persona-create unhealthy at {cfg.persona_create_url}/health; run `make up`"
+            )
+    except Exception as e:  # noqa: BLE001
+        problems.append(
+            f"persona-create unreachable at {cfg.persona_create_url} ({e}); run `make up`"
+        )
+
     # open-webui
     try:
         if _get(f"{cfg.open_webui_url}/health").status_code != 200:

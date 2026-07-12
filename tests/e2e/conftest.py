@@ -16,6 +16,7 @@ import pytest
 
 from helpers.audio import tone_wav
 from helpers.config import load_config
+from helpers.create_http import CreateHTTP, minimal_seed
 from helpers.qdrant_admin import QdrantAdmin
 from helpers.scenario_md import parse_scenario_file
 from helpers.store_http import StoreHTTP
@@ -78,3 +79,78 @@ def ada(cfg):
     finally:
         _purge(store, qa, pid)
         store.close()
+
+
+@pytest.fixture(scope="session")
+def image_gen_ready(cfg):
+    """Warm image-gen before the create flow: render once for the model persona-create
+    will use, polling through the `503 model_loading` responses so the create test's own
+    first render is fast and doesn't pay the cold-start (model download) latency."""
+    import time
+
+    import httpx
+
+    payload = {
+        "prompt": "studio portrait, plain background",
+        "negative_prompt": "lowres, watermark, text",
+        "width": 768,
+        "height": 1024,
+        "safe": False,
+    }
+    if cfg.image_gen_model:
+        payload["model_id"] = cfg.image_gen_model
+
+    budget_s = 1800.0  # cold model download (~GB) + first render
+    deadline = time.monotonic() + budget_s
+    with httpx.Client(base_url=cfg.image_gen_url, timeout=budget_s) as c:
+        while True:
+            r = c.post("/render", json=payload)
+            if r.status_code == 200:
+                return
+            if r.status_code == 503 and time.monotonic() < deadline:
+                time.sleep(5)  # model still loading; retry shortly
+                continue
+            pytest.fail(
+                f"image-gen not ready ({cfg.image_gen_model or 'default'}): "
+                f"{r.status_code} {r.text[:200]}"
+            )
+
+
+@pytest.fixture(scope="session")
+def created(cfg, image_gen_ready):
+    """Create-flow setup: drive persona-create's create flow end to end, yield a handle.
+
+    The seed is derived from the live vocabulary so it stays valid whatever the
+    skills tree contains. generate() blocks until the LLM finishes all three
+    phases; the avatar is fetched pre-commit, then the persona is committed to the
+    store. Always tears down by deleting the committed persona.
+    """
+    cc = CreateHTTP(cfg.persona_create_url)
+    store = StoreHTTP(cfg.persona_store_url)
+
+    seed = minimal_seed(cc.seed_vocabulary())
+    snapshot = cc.generate(seed)
+    snapshot.raise_for_status()
+    job = snapshot.json()
+    job_id = job["id"]
+
+    avatar = cc.get_avatar(job_id)
+    commit = cc.commit(job_id)
+    commit.raise_for_status()
+    persona_id = commit.json()["persona_id"]
+
+    handle = SimpleNamespace(
+        persona_id=persona_id,
+        job_id=job_id,
+        snapshot=job,
+        avatar=avatar,
+        cfg=cfg,
+        create=cc,
+        store=store,
+    )
+    try:
+        yield handle
+    finally:
+        store.delete_persona(persona_id)
+        store.close()
+        cc.close()
