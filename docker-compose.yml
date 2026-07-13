@@ -16,7 +16,9 @@ services:
       - ollama:/root/.ollama
     environment:
       OLLAMA_KEEP_ALIVE: 10m
-      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_CONTEXT_LENGTH: "16384"    # matches persona-cli's per-request num_ctx
+      OLLAMA_FLASH_ATTENTION: "1"       # required for KV-cache quantization to engage
+      OLLAMA_KV_CACHE_TYPE: "q8_0"      # near-lossless KV quant, ~halves cache VRAM
     deploy:
       resources:
         reservations:
