@@ -28,7 +28,7 @@ def minimal_seed(vocab: dict[str, Any]) -> dict[str, Any]:
 
 
 class CreateHTTP:
-    def __init__(self, base_url: str, *, timeout_s: float = 600.0) -> None:
+    def __init__(self, base_url: str, *, timeout_s: float = 2400.0) -> None:
         # Generation runs the LLM three times; the default timeout is generous.
         self._c = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout_s)
 

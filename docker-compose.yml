@@ -171,7 +171,7 @@ services:
               capabilities: [gpu]
 
   persona-create:
-    image: ghcr.io/muxu-io/persona-create:1.1.1
+    image: ghcr.io/muxu-io/persona-create:1.1.2
     container_name: persona-create
     restart: unless-stopped
     networks: [moai]
