@@ -80,11 +80,41 @@ def ada(cfg):
         store.close()
 
 
+def _free_gpu_for_image_gen(ollama_url: str) -> None:
+    """Unload resident ollama models so image-gen can load its checkpoint.
+
+    The stack shares one GPU. image-gen must load its model into free VRAM; if the
+    LLM is already resident (a warm ollama, or a re-run of the suite), the render
+    OOMs. Unload everything first — the create flow reloads the LLM afterward, and
+    the smaller image-gen model coexists with it. Best-effort: an ollama hiccup
+    here just leaves the render to fail loudly with its own OOM if VRAM is short.
+    """
+    import time
+
+    import httpx
+
+    try:
+        with httpx.Client(base_url=ollama_url, timeout=30.0) as c:
+            for m in c.get("/api/ps").json().get("models", []):
+                name = m.get("name") or m.get("model")
+                if name:  # keep_alive=0 with no prompt tells ollama to unload it
+                    c.post("/api/generate", json={"model": name, "keep_alive": 0})
+            # Wait for VRAM to actually free before image-gen tries to allocate.
+            deadline = time.monotonic() + 60
+            while c.get("/api/ps").json().get("models", []) and time.monotonic() < deadline:
+                time.sleep(2)
+    except httpx.HTTPError:
+        pass
+
+
 @pytest.fixture(scope="session")
 def image_gen_ready(cfg):
     """Warm image-gen before the create flow: render once for the model persona-create
     will use, polling through the `503 model_loading` responses so the create test's own
-    first render is fast and doesn't pay the cold-start (model download) latency."""
+    first render is fast and doesn't pay the cold-start (model download) latency.
+
+    First frees GPU VRAM (unloads resident ollama models) so image-gen's checkpoint
+    has room to load on the shared GPU — otherwise a resident LLM OOMs the render."""
     import time
 
     import httpx
@@ -98,6 +128,8 @@ def image_gen_ready(cfg):
     }
     if cfg.image_gen_model:
         payload["model_id"] = cfg.image_gen_model
+
+    _free_gpu_for_image_gen(cfg.ollama_url)
 
     budget_s = 1800.0  # cold model download (~GB) + first render
     deadline = time.monotonic() + budget_s
