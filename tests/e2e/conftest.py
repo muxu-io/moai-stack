@@ -34,11 +34,10 @@ def _purge(store: StoreHTTP, qa: QdrantAdmin, persona_id: str) -> None:
 
 @pytest.fixture(scope="session")
 def ada(cfg):
-    if not cfg.persona_file.exists():
-        pytest.skip(
-            f"persona file not found: {cfg.persona_file}. "
-            "Set MOAI_PERSONAS_DIR or check out the monorepo personas."
-        )
+    assert cfg.persona_file.exists(), (
+        f"persona fixture not found: {cfg.persona_file}. "
+        "It is vendored with the suite; unset MOAI_PERSONAS_DIR to use it."
+    )
 
     # Reuse the real parser/serializer so the POSTed definition matches runtime.
     from persona_core.parser import parse_persona_file

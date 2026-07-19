@@ -16,6 +16,9 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+_FIXTURES_PERSONAS = Path(__file__).resolve().parent.parent / "fixtures" / "personas"
+
+
 @dataclass(frozen=True)
 class Config:
     persona_store_url: str
@@ -46,7 +49,7 @@ class Config:
 
 def load_config() -> Config:
     personas_dir = Path(
-        _env("MOAI_PERSONAS_DIR", str(Path.home() / "moai" / "personas"))
+        _env("MOAI_PERSONAS_DIR", str(_FIXTURES_PERSONAS))
     ).expanduser()
     cfg = Config(
         persona_store_url=_env("PERSONA_STORE_URL", "http://localhost:7600").rstrip("/"),

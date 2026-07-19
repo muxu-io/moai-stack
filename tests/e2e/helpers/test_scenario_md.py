@@ -1,10 +1,11 @@
 from pathlib import Path
 
-import pytest
-
 from helpers.scenario_md import parse_scenario_file
 
-REAL = Path.home() / "moai" / "personas" / "ada-mcleish" / "scenarios" / "shift-cut-corridor.md"
+REAL = (
+    Path(__file__).resolve().parent.parent
+    / "fixtures" / "personas" / "ada-mcleish" / "scenarios" / "shift-cut-corridor.md"
+)
 
 
 def test_parses_inline(tmp_path):
@@ -32,7 +33,6 @@ def test_parses_inline(tmp_path):
     assert body["interlocutor"]["prose"] == "She looks at you."
 
 
-@pytest.mark.skipif(not REAL.exists(), reason="monorepo personas not present")
 def test_parses_real_ada_scenario():
     sid, title, body = parse_scenario_file(REAL)
     assert sid == "shift-cut-corridor"
