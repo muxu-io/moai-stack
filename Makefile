@@ -10,6 +10,12 @@
 -include .env
 export PERSONA_MODEL
 PERSONA_MODEL ?= huihui_ai/qwen3.5-abliterated:9b
+
+# Image model for the create flow, sourced the same way (single source of truth
+# in .env, shared by the persona-create container and the e2e warm-up). Empty =
+# image-gen's own default. The e2e never hardcodes a specific model.
+export IMAGE_GEN_MODEL
+IMAGE_GEN_MODEL ?=
 # Legacy alias for `make pull MODEL=...` / `make smoke MODEL=...` operator
 # muscle memory; defaults to PERSONA_MODEL.
 MODEL ?= $(PERSONA_MODEL)
@@ -23,8 +29,9 @@ DERIVED_MODEL ?= moai-qwen3-moe
 MODEL_BASE ?= huihui_ai/qwen3-abliterated:30b-a3b
 MODELFILE  ?= Modelfile.moai
 
-# voice-svc lives here and needs the host `video` group's GID for GPU access.
-export VOICE_SVC_GPU_GID ?= $(shell getent group video | cut -d: -f3)
+# voice-svc and image-gen-svc run as non-root and need the host `video` group's
+# GID to open the GPU device nodes. Derived once here and shared by both.
+export GPU_GID ?= $(shell getent group video | cut -d: -f3)
 
 GITLAB_PYPI_CLI  ?= https://gitlab.com/api/v4/projects/83774809/packages/pypi/simple
 GITLAB_PYPI_CORE ?= https://gitlab.com/api/v4/projects/83381755/packages/pypi/simple
@@ -131,8 +138,6 @@ $(E2E_VENV)/bin/persona: $(E2E_DIR)/pyproject.toml
 	@echo "[venv] building persona-cli harness venv (persona-cli + persona-core)"
 	$(build_venv)
 
-E2E_IMAGE_GEN_MODEL ?= realvis-xl-v5
-e2e: export IMAGE_GEN_MODEL := $(E2E_IMAGE_GEN_MODEL)
 e2e: up pull-model ## Run the gated end-to-end integration suite (GPU host)
 	@echo "[e2e] rebuilding harness venv from pinned wheels"
 	rm -rf $(E2E_VENV)

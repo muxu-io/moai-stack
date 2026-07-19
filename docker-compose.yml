@@ -109,7 +109,7 @@ services:
     restart: unless-stopped
     networks: [moai]
     group_add:
-      - "${VOICE_SVC_GPU_GID:?run via make, or: VOICE_SVC_GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
+      - "${GPU_GID:?run via make, or: GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
     ports:
       - "127.0.0.1:7000:7000"
     volumes:
@@ -138,19 +138,23 @@ services:
               capabilities: [gpu]
 
   image-gen-svc:
-    image: ghcr.io/muxu-io/image-gen-svc:1.0.0
+    image: ghcr.io/muxu-io/image-gen-svc:1.1.0
     container_name: image-gen-svc
     restart: unless-stopped
     networks: [moai]
+    group_add:
+      - "${GPU_GID:?run via make, or: GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
     ports:
       - "127.0.0.1:7300:7300"
     volumes:
       - image-gen-models:/models
-      - image-gen-hf-cache:/root/.cache/huggingface
+      - image-gen-hf-cache:/home/app/.cache/huggingface
     environment:
       IMAGE_GEN_SVC_PORT: "7300"
       IMAGE_GEN_SVC_MODELS_DIR: /models
-      HF_HOME: /root/.cache/huggingface
+      # The container runs as non-root `app` (HOME=/home/app); the HF cache must
+      # live somewhere that user can write. /root is root-only.
+      HF_HOME: /home/app/.cache/huggingface
     healthcheck:
       # /health responds before any model is loaded; the checkpoint (~20 GB) is
       # pulled lazily on the first /render, so becoming healthy is fast.
