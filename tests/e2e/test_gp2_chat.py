@@ -6,17 +6,14 @@ persist session_count (persona-store). Asserts the reply, the new turn-pair
 record, and the incremented session_count.
 
 PERSONA_MODEL is a reasoning model: with thinking on, run_turn's generate reads
-an empty `response` (the whole budget goes to the thinking channel). Rather than
-depend on a persona-cli change, we inject a transport that disables thinking at
-GenerationClient's own seam (helpers.gen_transport.NoThinkTransport) — so this
-runs against a *published* persona-cli. This validates the composition wiring;
-the product-level "disable thinking" fix is tracked separately.
+an empty `response` (the whole budget goes to the thinking channel). persona-cli
+1.1.0 threads `think` through GenerationClient/run_turn and defaults it off, so we
+take that default — no custom transport needed. This validates the composition
+wiring against a *published* persona-cli.
 """
 
 import uuid
 from datetime import UTC, datetime
-
-from helpers.gen_transport import NoThinkTransport
 
 
 def test_chat_turn(ada):
@@ -43,9 +40,7 @@ def test_chat_turn(ada):
         vector_size=cfg.vector_size,
         persona_id=pid,
     )
-    gen = GenerationClient(
-        model=cfg.persona_model, transport=NoThinkTransport(cfg.ollama_url)
-    )
+    gen = GenerationClient(model=cfg.persona_model, host=cfg.ollama_url)
 
     loaded = load_persona(pid, client, embedder)
 

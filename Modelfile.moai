@@ -1,0 +1,99 @@
+# Derived runtime model: refusal-ablated Qwen3 30B-A3B MoE, tuned for this stack.
+# Base template + stop tokens + sampling params are inherited via FROM; this
+# layer adds memory/runtime pins Ollama can't take from env, plus a template
+# edit that suppresses reasoning leakage (see TEMPLATE note below).
+#
+# Build (base must be pulled; a derived tag is local, so NOT pullable and
+# `make pull-model` errors on it):
+#   docker exec ollama ollama pull huihui_ai/qwen3-abliterated:30b-a3b
+#   docker cp Modelfile.moai ollama:/tmp/Modelfile.moai
+#   docker exec ollama ollama create moai-qwen3-moe -f /tmp/Modelfile.moai
+# Then point the stack at it and reload (restart, NOT pull-model):
+#   .env:  PERSONA_MODEL=moai-qwen3-moe
+#   make restart
+
+FROM huihui_ai/qwen3-abliterated:30b-a3b
+
+# Read the whole ~18.6 GB blob into RAM at load instead of memory-mapping from
+# disk. Kills mid-token page faults when a needed expert isn't resident. Costs a
+# slower first load and ~18.6 GB of RAM (fine on 60 GB).
+PARAMETER use_mmap false
+
+# Default context. Matches OLLAMA_CONTEXT_LENGTH and persona-cli's per-request
+# num_ctx so every path allocates the same KV budget.
+PARAMETER num_ctx 16384
+
+# GPU layer count. REQUIRED: auto-fit puts 33/48 layers on GPU and saturates the
+# 16 GB card, starving the co-resident nomic-embed-text model (its runner
+# OOM-crashes and embeddings 500, breaking per-turn memory retrieval). Cap 26
+# holds VRAM near 13.7 GB text-only so both stay resident, at roughly 15pct speed
+# cost (measured 48.9 to 41.7 tok/s). With voice-svc (~2 GB) also resident it
+# runs tight near 15.3/16.3 GB: voice idle 39.5, voice synthesizing 31.3 tok/s.
+# Drop to 22-24 for OOM margin; raise toward 33 only for text-only, embed-free.
+PARAMETER num_gpu 26
+
+# This base is a reasoning model that emits <think>...</think> as ORDINARY
+# content: its GGUF ships the stock qwen template with no thinking channel, so
+# Ollama's think=false flag (which persona-cli already sends) cannot gate it and
+# the reasoning would be spoken aloud by voice personas. Fix: pre-close a think
+# block at the assistant generation point in BOTH chat and generate branches, so
+# the model starts after </think> and the tags live in the prompt, never in the
+# response. Verified: zero <think> in output on reasoning prompts.
+TEMPLATE """{{- if .Messages }}
+{{- if or .System .Tools }}<|im_start|>system
+{{- if .System }}
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+# Tools
+
+You may call one or more functions to assist with the user query.
+
+You are provided with function signatures within <tools></tools> XML tags:
+<tools>
+{{- range .Tools }}
+{"type": "function", "function": {{ .Function }}}
+{{- end }}
+</tools>
+
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>
+{{- end }}<|im_end|>
+{{ end }}
+{{- range $i, $_ := .Messages }}
+{{- $last := eq (len (slice $.Messages $i)) 1 -}}
+{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{ else if eq .Role "assistant" }}<|im_start|>assistant
+{{ if .Content }}{{ .Content }}
+{{- else if .ToolCalls }}<tool_call>
+{{ range .ToolCalls }}{"name": "{{ .Function.Name }}", "arguments": {{ .Function.Arguments }}}
+{{ end }}</tool_call>
+{{- end }}{{ if not $last }}<|im_end|>
+{{ end }}
+{{- else if eq .Role "tool" }}<|im_start|>user
+<tool_response>
+{{ .Content }}
+</tool_response><|im_end|>
+{{ end }}
+{{- if and (ne .Role "assistant") $last }}<|im_start|>assistant
+<think>
+
+</think>
+
+{{ end }}
+{{- end }}
+{{- else }}
+{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+<think>
+
+</think>
+
+{{ end }}{{ .Response }}{{ if .Response }}<|im_end|>{{ end }}"""

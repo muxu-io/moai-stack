@@ -16,6 +16,9 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+_FIXTURES_PERSONAS = Path(__file__).resolve().parent.parent / "fixtures" / "personas"
+
+
 @dataclass(frozen=True)
 class Config:
     persona_store_url: str
@@ -24,6 +27,9 @@ class Config:
     qdrant_port: int
     voice_svc_url: str
     open_webui_url: str
+    persona_create_url: str
+    image_gen_url: str
+    image_gen_model: str
     persona_model: str
     embed_model: str
     qdrant_collection: str
@@ -43,7 +49,7 @@ class Config:
 
 def load_config() -> Config:
     personas_dir = Path(
-        _env("MOAI_PERSONAS_DIR", str(Path.home() / "moai" / "personas"))
+        _env("MOAI_PERSONAS_DIR", str(_FIXTURES_PERSONAS))
     ).expanduser()
     cfg = Config(
         persona_store_url=_env("PERSONA_STORE_URL", "http://localhost:7600").rstrip("/"),
@@ -52,6 +58,9 @@ def load_config() -> Config:
         qdrant_port=int(_env("QDRANT_PORT", "6333")),
         voice_svc_url=_env("VOICE_SVC_URL", "http://localhost:7000").rstrip("/"),
         open_webui_url=_env("OPENWEBUI_URL", "http://localhost:8080").rstrip("/"),
+        persona_create_url=_env("PERSONA_CREATE_URL", "http://localhost:7250").rstrip("/"),
+        image_gen_url=_env("IMAGE_GEN_URL", "http://localhost:7300").rstrip("/"),
+        image_gen_model=_env("IMAGE_GEN_MODEL", ""),  # empty = image-gen's default; e2e sets realvis
         persona_model=_env("PERSONA_MODEL", "huihui_ai/qwen3.5-abliterated:9b"),
         embed_model=_env("EMBED_MODEL", "nomic-embed-text"),
         qdrant_collection=_env("QDRANT_COLLECTION", "persona_memory"),

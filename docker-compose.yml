@@ -16,7 +16,9 @@ services:
       - ollama:/root/.ollama
     environment:
       OLLAMA_KEEP_ALIVE: 10m
-      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_CONTEXT_LENGTH: "16384"    # matches persona-cli's per-request num_ctx
+      OLLAMA_FLASH_ATTENTION: "1"       # required for KV-cache quantization to engage
+      OLLAMA_KV_CACHE_TYPE: "q8_0"      # near-lossless KV quant, ~halves cache VRAM
     deploy:
       resources:
         reservations:
@@ -107,7 +109,7 @@ services:
     restart: unless-stopped
     networks: [moai]
     group_add:
-      - "${VOICE_SVC_GPU_GID:?run via make, or: VOICE_SVC_GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
+      - "${GPU_GID:?run via make, or: GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
     ports:
       - "127.0.0.1:7000:7000"
     volumes:
@@ -135,6 +137,67 @@ services:
               count: all
               capabilities: [gpu]
 
+  image-gen-svc:
+    image: ghcr.io/muxu-io/image-gen-svc:1.1.0
+    container_name: image-gen-svc
+    restart: unless-stopped
+    networks: [moai]
+    group_add:
+      - "${GPU_GID:?run via make, or: GPU_GID=$(getent group video | cut -d: -f3) docker compose up}"
+    ports:
+      - "127.0.0.1:7300:7300"
+    volumes:
+      - image-gen-models:/models
+      - image-gen-hf-cache:/home/app/.cache/huggingface
+    environment:
+      IMAGE_GEN_SVC_PORT: "7300"
+      IMAGE_GEN_SVC_MODELS_DIR: /models
+      # The container runs as non-root `app` (HOME=/home/app); the HF cache must
+      # live somewhere that user can write. /root is root-only.
+      HF_HOME: /home/app/.cache/huggingface
+    healthcheck:
+      # /health responds before any model is loaded; the checkpoint (~20 GB) is
+      # pulled lazily on the first /render, so becoming healthy is fast.
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7300/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  persona-create:
+    image: ghcr.io/muxu-io/persona-create:1.1.2
+    container_name: persona-create
+    restart: unless-stopped
+    networks: [moai]
+    depends_on:
+      persona-store:
+        condition: service_healthy
+      image-gen-svc:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    ports:
+      - "127.0.0.1:7250:7250"
+    environment:
+      STORE_URL: http://persona-store:7600
+      IMAGE_GEN_URL: http://image-gen-svc:7300
+      OLLAMA_URL: http://ollama:11434
+      PERSONA_MODEL: "${PERSONA_MODEL:-huihui_ai/qwen3.5-abliterated:9b}"
+      WORKSPACE_ROOT: /tmp/persona-jobs
+      IMAGE_GEN_SAFE: "false"
+      IMAGE_GEN_MODEL: "${IMAGE_GEN_MODEL:-}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7250/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
 volumes:
   ollama:
     name: ollama
@@ -148,3 +211,5 @@ volumes:
   voice-svc-models:
   voice-svc-hf-cache:
   voice-svc-sample-cache:
+  image-gen-models:
+  image-gen-hf-cache:

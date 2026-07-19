@@ -2,16 +2,36 @@
 # Requires membership in the `docker` group.
 # Re-login (or `newgrp docker`) after a fresh `sudo usermod -aG docker $USER`.
 
-# Single source of truth for the LLM model — moai-stack owns ollama, so it owns
-# getting PERSONA_MODEL into it. persona-web (authoring repo) reads the same
-# value from its own .env. Override at the shell or in .env to switch.
+# Single source of truth for the LLM model. moai-stack owns ollama, so it owns
+# getting PERSONA_MODEL into it. We read it straight from the same .env that
+# docker compose loads, so `make` and the containers never disagree; the ?=
+# below is only the fallback when .env is absent. `export` hands it to the
+# persona-cli subprocess `make chat` spawns. Override at the shell to switch.
+-include .env
+export PERSONA_MODEL
 PERSONA_MODEL ?= huihui_ai/qwen3.5-abliterated:9b
+
+# Image model for the create flow, sourced the same way (single source of truth
+# in .env, shared by the persona-create container and the e2e warm-up). Empty =
+# image-gen's own default. The e2e never hardcodes a specific model.
+export IMAGE_GEN_MODEL
+IMAGE_GEN_MODEL ?=
 # Legacy alias for `make pull MODEL=...` / `make smoke MODEL=...` operator
 # muscle memory; defaults to PERSONA_MODEL.
 MODEL ?= $(PERSONA_MODEL)
 
-# voice-svc lives here and needs the host `video` group's GID for GPU access.
-export VOICE_SVC_GPU_GID ?= $(shell getent group video | cut -d: -f3)
+# The derived runtime model is a LOCAL ollama tag: it can't be pulled, and its
+# ~18 GB blob is too big to publish as an image. `build-model` creates it from
+# the Modelfile; `pull-model` calls that automatically when PERSONA_MODEL is
+# this tag, so every target that depends on pull-model (chat, load-persona, e2e)
+# just works.
+DERIVED_MODEL ?= moai-qwen3-moe
+MODEL_BASE ?= huihui_ai/qwen3-abliterated:30b-a3b
+MODELFILE  ?= Modelfile.moai
+
+# voice-svc and image-gen-svc run as non-root and need the host `video` group's
+# GID to open the GPU device nodes. Derived once here and shared by both.
+export GPU_GID ?= $(shell getent group video | cut -d: -f3)
 
 GITLAB_PYPI_CLI  ?= https://gitlab.com/api/v4/projects/83774809/packages/pypi/simple
 GITLAB_PYPI_CORE ?= https://gitlab.com/api/v4/projects/83381755/packages/pypi/simple
@@ -31,10 +51,10 @@ PERSONA_FILE      ?= $(MOAI_PERSONAS_DIR)/$(PERSONA_ID).md
 PERSONA_STORE_URL ?= http://localhost:7600
 
 .PHONY: help up down restart logs ps pull models smoke vram chat ollama-chat ui \
-        qdrant-status qdrant-ui pull-model load-persona e2e
+        qdrant-status qdrant-ui pull-model build-model load-persona e2e
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'
 
 up: ## Start the platform + runtime services in the background
 	docker compose up -d
@@ -57,11 +77,24 @@ pull: ## Pull MODEL (override: make pull MODEL=...)
 models: ## List downloaded models
 	docker compose exec ollama ollama list
 
-pull-model: up ## Pull PERSONA_MODEL + EMBED_MODEL into ollama (~6.6 GB; idempotent)
-	@echo "[pull-model] pulling $(PERSONA_MODEL) (no-op if already cached)"
-	docker compose exec ollama ollama pull $(PERSONA_MODEL)
-	@echo "[pull-model] pulling embed model $(EMBED_MODEL) (no-op if already cached)"
+build-model: up ## Build the local derived model (moai-qwen3-moe) from Modelfile.moai; idempotent, cheap (reuses the base blob)
+	@docker compose exec -T ollama ollama list | grep -qF "$(MODEL_BASE)" \
+	  || { echo "[build-model] pulling base $(MODEL_BASE) (~18.6 GB, first time only)"; \
+	       docker compose exec ollama ollama pull $(MODEL_BASE); }
+	@echo "[build-model] creating $(DERIVED_MODEL) from $(MODELFILE)"
+	docker compose cp $(MODELFILE) ollama:/tmp/$(notdir $(MODELFILE))
+	docker compose exec ollama ollama create $(DERIVED_MODEL) -f /tmp/$(notdir $(MODELFILE))
+
+pull-model: up ## Ensure PERSONA_MODEL + EMBED_MODEL are available (builds the derived model if PERSONA_MODEL is local)
+	@echo "[pull-model] embed model $(EMBED_MODEL) (no-op if cached)"
 	docker compose exec ollama ollama pull $(EMBED_MODEL)
+	@if [ "$(PERSONA_MODEL)" = "$(DERIVED_MODEL)" ]; then \
+	  echo "[pull-model] $(PERSONA_MODEL) is a local derived tag -> build-model"; \
+	  $(MAKE) build-model; \
+	else \
+	  echo "[pull-model] pulling $(PERSONA_MODEL) (no-op if cached)"; \
+	  docker compose exec ollama ollama pull $(PERSONA_MODEL); \
+	fi
 
 smoke: ## Quick inference smoke test against MODEL
 	@curl -s http://localhost:11434/api/generate -d '{"model":"$(MODEL)","prompt":"In one sentence, what is the difference between an LLM and a database?","stream":false}' \
@@ -112,7 +145,8 @@ e2e: up pull-model ## Run the gated end-to-end integration suite (GPU host)
 	@echo "[e2e] waiting for HTTP services to become ready (up -d does not wait for health)"
 	@for url in http://localhost:7600/health http://localhost:7000/health \
 	            http://localhost:6333/healthz http://localhost:11434/api/tags \
-	            http://localhost:8080/health; do \
+	            http://localhost:8080/health http://localhost:7300/health \
+	            http://localhost:7250/health; do \
 	  printf '  %-40s ' "$$url"; \
 	  n=0; until curl -fsS "$$url" >/dev/null 2>&1; do \
 	    n=$$((n+1)); [ $$n -gt 60 ] && { echo "TIMEOUT"; exit 1; }; sleep 3; \

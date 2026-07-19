@@ -40,17 +40,30 @@ def owui_headers(cfg):
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_open_webui_lists_persona_model(cfg, owui_headers):
+@pytest.fixture(scope="session")
+def persona_model_id(cfg, owui_headers):
+    """The exact model id open-webui advertises for PERSONA_MODEL.
+
+    ollama resolves an untagged name (`moai-qwen3-moe`) to `:latest`, and that is
+    the id open-webui registers and the UI sends. Its OpenAI-compat completions
+    endpoint requires that fully-qualified id — the bare name 404s — so the test
+    must drive the id open-webui actually offers, not the raw config value.
+    """
     r = httpx.get(f"{cfg.open_webui_url}/ollama/api/tags", headers=owui_headers, timeout=15.0)
     assert r.status_code == 200, r.text
     names = _model_names(r.json())
     assert names, "open-webui returned an empty model list"
-    assert any(_matches(n, cfg.persona_model) for n in names), (
-        f"PERSONA_MODEL '{cfg.persona_model}' not in {names}"
-    )
+    match = next((n for n in names if _matches(n, cfg.persona_model)), None)
+    assert match, f"PERSONA_MODEL '{cfg.persona_model}' not in {names}"
+    return match
 
 
-def test_open_webui_completes_a_chat(cfg, owui_headers):
+def test_open_webui_lists_persona_model(persona_model_id):
+    # Resolving the fixture is the assertion: PERSONA_MODEL is advertised.
+    assert persona_model_id
+
+
+def test_open_webui_completes_a_chat(cfg, owui_headers, persona_model_id):
     # `params: {think: false}` is open-webui's advanced-params passthrough — it
     # forwards `think` to ollama's native flag, disabling reasoning for this
     # request. Without it, PERSONA_MODEL (a reasoning model) spends thousands of
@@ -60,7 +73,7 @@ def test_open_webui_completes_a_chat(cfg, owui_headers):
         f"{cfg.open_webui_url}/api/chat/completions",
         headers=owui_headers,
         json={
-            "model": cfg.persona_model,
+            "model": persona_model_id,
             "messages": [{"role": "user", "content": "Say hello in exactly one word."}],
             "stream": False,
             "params": {"think": False},

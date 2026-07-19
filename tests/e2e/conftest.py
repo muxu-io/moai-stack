@@ -16,6 +16,7 @@ import pytest
 
 from helpers.audio import tone_wav
 from helpers.config import load_config
+from helpers.create_http import CreateHTTP, minimal_seed
 from helpers.qdrant_admin import QdrantAdmin
 from helpers.scenario_md import parse_scenario_file
 from helpers.store_http import StoreHTTP
@@ -33,11 +34,10 @@ def _purge(store: StoreHTTP, qa: QdrantAdmin, persona_id: str) -> None:
 
 @pytest.fixture(scope="session")
 def ada(cfg):
-    if not cfg.persona_file.exists():
-        pytest.skip(
-            f"persona file not found: {cfg.persona_file}. "
-            "Set MOAI_PERSONAS_DIR or check out the monorepo personas."
-        )
+    assert cfg.persona_file.exists(), (
+        f"persona fixture not found: {cfg.persona_file}. "
+        "It is vendored with the suite; unset MOAI_PERSONAS_DIR to use it."
+    )
 
     # Reuse the real parser/serializer so the POSTed definition matches runtime.
     from persona_core.parser import parse_persona_file
@@ -78,3 +78,110 @@ def ada(cfg):
     finally:
         _purge(store, qa, pid)
         store.close()
+
+
+def _free_gpu_for_image_gen(ollama_url: str) -> None:
+    """Unload resident ollama models so image-gen can load its checkpoint.
+
+    The stack shares one GPU. image-gen must load its model into free VRAM; if the
+    LLM is already resident (a warm ollama, or a re-run of the suite), the render
+    OOMs. Unload everything first — the create flow reloads the LLM afterward, and
+    the smaller image-gen model coexists with it. Best-effort: an ollama hiccup
+    here just leaves the render to fail loudly with its own OOM if VRAM is short.
+    """
+    import time
+
+    import httpx
+
+    try:
+        with httpx.Client(base_url=ollama_url, timeout=30.0) as c:
+            for m in c.get("/api/ps").json().get("models", []):
+                name = m.get("name") or m.get("model")
+                if name:  # keep_alive=0 with no prompt tells ollama to unload it
+                    c.post("/api/generate", json={"model": name, "keep_alive": 0})
+            # Wait for VRAM to actually free before image-gen tries to allocate.
+            deadline = time.monotonic() + 60
+            while c.get("/api/ps").json().get("models", []) and time.monotonic() < deadline:
+                time.sleep(2)
+    except httpx.HTTPError:
+        pass
+
+
+@pytest.fixture(scope="session")
+def image_gen_ready(cfg):
+    """Warm image-gen before the create flow: render once for the model persona-create
+    will use, polling through the `503 model_loading` responses so the create test's own
+    first render is fast and doesn't pay the cold-start (model download) latency.
+
+    First frees GPU VRAM (unloads resident ollama models) so image-gen's checkpoint
+    has room to load on the shared GPU — otherwise a resident LLM OOMs the render."""
+    import time
+
+    import httpx
+
+    payload = {
+        "prompt": "studio portrait, plain background",
+        "negative_prompt": "lowres, watermark, text",
+        "width": 768,
+        "height": 1024,
+        "safe": False,
+    }
+    if cfg.image_gen_model:
+        payload["model_id"] = cfg.image_gen_model
+
+    _free_gpu_for_image_gen(cfg.ollama_url)
+
+    budget_s = 1800.0  # cold model download (~GB) + first render
+    deadline = time.monotonic() + budget_s
+    with httpx.Client(base_url=cfg.image_gen_url, timeout=budget_s) as c:
+        while True:
+            r = c.post("/render", json=payload)
+            if r.status_code == 200:
+                return
+            if r.status_code == 503 and time.monotonic() < deadline:
+                time.sleep(5)  # model still loading; retry shortly
+                continue
+            pytest.fail(
+                f"image-gen not ready ({cfg.image_gen_model or 'default'}): "
+                f"{r.status_code} {r.text[:200]}"
+            )
+
+
+@pytest.fixture(scope="session")
+def created(cfg, image_gen_ready):
+    """Create-flow setup: drive persona-create's create flow end to end, yield a handle.
+
+    The seed is derived from the live vocabulary so it stays valid whatever the
+    skills tree contains. generate() blocks until the LLM finishes all three
+    phases; the avatar is fetched pre-commit, then the persona is committed to the
+    store. Always tears down by deleting the committed persona.
+    """
+    cc = CreateHTTP(cfg.persona_create_url)
+    store = StoreHTTP(cfg.persona_store_url)
+
+    seed = minimal_seed(cc.seed_vocabulary())
+    snapshot = cc.generate(seed)
+    snapshot.raise_for_status()
+    job = snapshot.json()
+    job_id = job["id"]
+
+    avatar = cc.get_avatar(job_id)
+    commit = cc.commit(job_id)
+    commit.raise_for_status()
+    persona_id = commit.json()["persona_id"]
+
+    handle = SimpleNamespace(
+        persona_id=persona_id,
+        job_id=job_id,
+        snapshot=job,
+        avatar=avatar,
+        cfg=cfg,
+        create=cc,
+        store=store,
+    )
+    try:
+        yield handle
+    finally:
+        store.delete_persona(persona_id)
+        store.close()
+        cc.close()
